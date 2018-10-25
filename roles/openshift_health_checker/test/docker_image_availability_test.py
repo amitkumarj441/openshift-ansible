@@ -1,178 +1,41 @@
-import pytest
-
 from openshift_checks.docker_image_availability import DockerImageAvailability
 
-
-@pytest.mark.parametrize('deployment_type,is_active', [
-    ("origin", True),
-    ("openshift-enterprise", True),
-    ("enterprise", False),
-    ("online", False),
-    ("invalid", False),
-    ("", False),
-])
-def test_is_active(deployment_type, is_active):
-    task_vars = dict(
-        openshift_deployment_type=deployment_type,
-    )
-    assert DockerImageAvailability.is_active(task_vars=task_vars) == is_active
+try:
+    # python3, mock is built in.
+    from unittest.mock import patch
+except ImportError:
+    # In python2, mock is installed via pip.
+    from mock import patch
 
 
-@pytest.mark.parametrize("is_containerized,is_atomic", [
-    (True, True),
-    (False, False),
-    (True, False),
-    (False, True),
-])
-def test_all_images_available_locally(is_containerized, is_atomic):
-    def execute_module(module_name, args, task_vars):
-        if module_name == "yum":
-            return {"changed": True}
+def test_is_available_skopeo_image():
+    result = {'rc': 0}
+    # test unauth secure and insecure
+    openshift_docker_insecure_registries = ['insecure.redhat.io']
+    task_vars = {'openshift_docker_insecure_registries': openshift_docker_insecure_registries}
+    dia = DockerImageAvailability(task_vars=task_vars)
+    with patch.object(DockerImageAvailability, 'execute_module_with_retries') as m1:
+        m1.return_value = result
+        assert dia.is_available_skopeo_image('registry.redhat.io/openshift3/ose-pod') is True
+        m1.assert_called_with('command', {'_uses_shell': True, '_raw_params': ' timeout 10 skopeo inspect --tls-verify=true  docker://registry.redhat.io/openshift3/ose-pod'})
+        assert dia.is_available_skopeo_image('insecure.redhat.io/openshift3/ose-pod') is True
+        m1.assert_called_with('command', {'_uses_shell': True, '_raw_params': ' timeout 10 skopeo inspect --tls-verify=false  docker://insecure.redhat.io/openshift3/ose-pod'})
 
-        assert module_name == "docker_image_facts"
-        assert 'name' in args
-        assert args['name']
-        return {
-            'images': [args['name']],
-        }
-
-    result = DockerImageAvailability(execute_module=execute_module).run(tmp=None, task_vars=dict(
-        openshift=dict(
-            common=dict(
-                service_type='origin',
-                is_containerized=is_containerized,
-                is_atomic=is_atomic,
-            ),
-            docker=dict(additional_registries=["docker.io"]),
-        ),
-        openshift_deployment_type='origin',
-        openshift_release='v3.4',
-        openshift_image_tag='3.4',
-    ))
-
-    assert not result.get('failed', False)
+    # test auth
+    task_vars = {'oreg_auth_user': 'test_user', 'oreg_auth_password': 'test_pass'}
+    dia = DockerImageAvailability(task_vars=task_vars)
+    with patch.object(DockerImageAvailability, 'execute_module_with_retries') as m1:
+        m1.return_value = result
+        assert dia.is_available_skopeo_image('registry.redhat.io/openshift3/ose-pod') is True
+        m1.assert_called_with('command', {'_uses_shell': True, '_raw_params': ' timeout 10 skopeo inspect --tls-verify=true --creds=test_user:test_pass docker://registry.redhat.io/openshift3/ose-pod'})
 
 
-@pytest.mark.parametrize("available_locally", [
-    False,
-    True,
-])
-def test_all_images_available_remotely(available_locally):
-    def execute_module(module_name, args, task_vars):
-        if module_name == 'docker_image_facts':
-            return {'images': [], 'failed': available_locally}
-        return {'changed': False}
+def test_available_images():
+    images = ['image1', 'image2']
+    dia = DockerImageAvailability(task_vars={})
 
-    result = DockerImageAvailability(execute_module=execute_module).run(tmp=None, task_vars=dict(
-        openshift=dict(
-            common=dict(
-                service_type='origin',
-                is_containerized=False,
-                is_atomic=False,
-            ),
-            docker=dict(additional_registries=["docker.io", "registry.access.redhat.com"]),
-        ),
-        openshift_deployment_type='origin',
-        openshift_release='3.4',
-        openshift_image_tag='v3.4',
-    ))
+    with patch('openshift_checks.docker_image_availability.DockerImageAvailability.is_available_skopeo_image') as call_mock:
+        call_mock.return_value = True
 
-    assert not result.get('failed', False)
-
-
-def test_all_images_unavailable():
-    def execute_module(module_name=None, module_args=None, tmp=None, task_vars=None):
-        if module_name == "command":
-            return {
-                'failed': True,
-            }
-
-        return {
-            'changed': False,
-        }
-
-    check = DockerImageAvailability(execute_module=execute_module)
-    actual = check.run(tmp=None, task_vars=dict(
-        openshift=dict(
-            common=dict(
-                service_type='origin',
-                is_containerized=False,
-                is_atomic=False,
-            ),
-            docker=dict(additional_registries=["docker.io"]),
-        ),
-        openshift_deployment_type="openshift-enterprise",
-        openshift_release=None,
-        openshift_image_tag='latest'
-    ))
-
-    assert actual['failed']
-    assert "required Docker images are not available" in actual['msg']
-
-
-@pytest.mark.parametrize("message,extra_words", [
-    (
-        "docker image update failure",
-        ["docker image update failure"],
-    ),
-    (
-        "No package matching 'skopeo' found available, installed or updated",
-        ["dependencies can be installed via `yum`"]
-    ),
-])
-def test_skopeo_update_failure(message, extra_words):
-    def execute_module(module_name=None, module_args=None, tmp=None, task_vars=None):
-        if module_name == "yum":
-            return {
-                "failed": True,
-                "msg": message,
-                "changed": False,
-            }
-
-        return {'changed': False}
-
-    actual = DockerImageAvailability(execute_module=execute_module).run(tmp=None, task_vars=dict(
-        openshift=dict(
-            common=dict(
-                service_type='origin',
-                is_containerized=False,
-                is_atomic=False,
-            ),
-            docker=dict(additional_registries=["unknown.io"]),
-        ),
-        openshift_deployment_type="openshift-enterprise",
-        openshift_release='',
-        openshift_image_tag='',
-    ))
-
-    assert actual["failed"]
-    for word in extra_words:
-        assert word in actual["msg"]
-
-
-@pytest.mark.parametrize("deployment_type,registries", [
-    ("origin", ["unknown.io"]),
-    ("openshift-enterprise", ["registry.access.redhat.com"]),
-    ("openshift-enterprise", []),
-])
-def test_registry_availability(deployment_type, registries):
-    def execute_module(module_name=None, module_args=None, tmp=None, task_vars=None):
-        return {
-            'changed': False,
-        }
-
-    actual = DockerImageAvailability(execute_module=execute_module).run(tmp=None, task_vars=dict(
-        openshift=dict(
-            common=dict(
-                service_type='origin',
-                is_containerized=False,
-                is_atomic=False,
-            ),
-            docker=dict(additional_registries=registries),
-        ),
-        openshift_deployment_type=deployment_type,
-        openshift_release='',
-        openshift_image_tag='',
-    ))
-
-    assert not actual.get("failed", False)
+        images_available = dia.available_images(images)
+        assert images_available == images

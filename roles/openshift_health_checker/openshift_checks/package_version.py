@@ -1,25 +1,47 @@
-# pylint: disable=missing-docstring
-from openshift_checks import OpenShiftCheck, get_var
-from openshift_checks.mixins import NotContainerizedMixin
+"""Check that available RPM packages match the required versions."""
+
+from openshift_checks import OpenShiftCheck
 
 
-class PackageVersion(NotContainerizedMixin, OpenShiftCheck):
+class PackageVersion(OpenShiftCheck):
     """Check that available RPM packages match the required versions."""
 
     name = "package_version"
     tags = ["preflight"]
 
-    @classmethod
-    def is_active(cls, task_vars):
+    def is_active(self):
         """Skip hosts that do not have package requirements."""
-        group_names = get_var(task_vars, "group_names", default=[])
-        master_or_node = 'masters' in group_names or 'nodes' in group_names
-        return super(PackageVersion, cls).is_active(task_vars) and master_or_node
+        group_names = self.get_var("group_names", default=[])
+        master_or_node = 'oo_masters_to_config' in group_names or 'oo_nodes_to_config' in group_names
+        return super(PackageVersion, self).is_active() and master_or_node
 
-    def run(self, tmp, task_vars):
+    def run(self):
+        rpm_prefix = self.get_var("openshift_service_type")
+        if self._templar is not None:
+            rpm_prefix = self._templar.template(rpm_prefix)
+        openshift_release = self.get_var("openshift_release", default='')
+        deployment_type = self.get_var("openshift_deployment_type")
+        check_multi_minor_release = deployment_type in ['openshift-enterprise']
+
         args = {
-            "requested_openshift_release": get_var(task_vars, "openshift_release", default=''),
-            "openshift_deployment_type": get_var(task_vars, "openshift_deployment_type"),
-            "rpm_prefix": get_var(task_vars, "openshift", "common", "service_type"),
+            "package_mgr": self.get_var("ansible_pkg_mgr"),
+            "package_list": [
+                {
+                    "name": "{}".format(rpm_prefix),
+                    "version": openshift_release,
+                    "check_multi": check_multi_minor_release,
+                },
+                {
+                    "name": "{}-master".format(rpm_prefix),
+                    "version": openshift_release,
+                    "check_multi": check_multi_minor_release,
+                },
+                {
+                    "name": "{}-node".format(rpm_prefix),
+                    "version": openshift_release,
+                    "check_multi": check_multi_minor_release,
+                },
+            ],
         }
-        return self.execute_module("aos_version", args, tmp, task_vars)
+
+        return self.execute_module_with_retries("aos_version", args)

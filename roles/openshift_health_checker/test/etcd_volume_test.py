@@ -1,6 +1,7 @@
 import pytest
 
-from openshift_checks.etcd_volume import EtcdVolume, OpenShiftCheckException
+from openshift_checks.etcd_volume import EtcdVolume
+from openshift_checks import OpenShiftCheckException
 
 
 @pytest.mark.parametrize('ansible_mounts,extra_words', [
@@ -11,12 +12,11 @@ def test_cannot_determine_available_disk(ansible_mounts, extra_words):
     task_vars = dict(
         ansible_mounts=ansible_mounts,
     )
-    check = EtcdVolume(execute_module=fake_execute_module)
 
     with pytest.raises(OpenShiftCheckException) as excinfo:
-        check.run(tmp=None, task_vars=task_vars)
+        EtcdVolume(fake_execute_module, task_vars).run()
 
-    for word in 'Unable to find etcd storage mount point'.split() + extra_words:
+    for word in ['Unable to determine mount point'] + extra_words:
         assert word in str(excinfo.value)
 
 
@@ -76,8 +76,7 @@ def test_succeeds_with_recommended_disk_space(size_limit, ansible_mounts):
     if task_vars["etcd_device_usage_threshold_percent"] is None:
         task_vars.pop("etcd_device_usage_threshold_percent")
 
-    check = EtcdVolume(execute_module=fake_execute_module)
-    result = check.run(tmp=None, task_vars=task_vars)
+    result = EtcdVolume(fake_execute_module, task_vars).run()
 
     assert not result.get('failed', False)
 
@@ -137,8 +136,7 @@ def test_fails_with_insufficient_disk_space(size_limit_percent, ansible_mounts, 
     if task_vars["etcd_device_usage_threshold_percent"] is None:
         task_vars.pop("etcd_device_usage_threshold_percent")
 
-    check = EtcdVolume(execute_module=fake_execute_module)
-    result = check.run(tmp=None, task_vars=task_vars)
+    result = EtcdVolume(fake_execute_module, task_vars).run()
 
     assert result['failed']
     for word in extra_words:

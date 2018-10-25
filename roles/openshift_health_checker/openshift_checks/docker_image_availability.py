@@ -1,179 +1,132 @@
-# pylint: disable=missing-docstring
-from openshift_checks import OpenShiftCheck, get_var
+"""Check that required Docker images are available."""
+
+from pipes import quote
+from ansible.module_utils import six
+from openshift_checks import OpenShiftCheck
+from openshift_checks.mixins import DockerHostMixin
 
 
-class DockerImageAvailability(OpenShiftCheck):
+class DockerImageAvailability(DockerHostMixin, OpenShiftCheck):
     """Check that required Docker images are available.
 
-    This check attempts to ensure that required docker images are
-    either present locally, or able to be pulled down from available
-    registries defined in a host machine.
+    Determine docker images that an install would require and check that they
+    are either present in the host's docker index, or available for the host to pull
+    with known registries as defined in our inventory file (or defaults).
     """
 
     name = "docker_image_availability"
     tags = ["preflight"]
+    # we use python-docker-py to check local docker for images, and skopeo
+    # to look for images available remotely without actually pulling them.
 
-    dependencies = ["skopeo", "python-docker-py"]
+    # command for checking if remote registries have an image, without docker pull
+    skopeo_command = "{proxyvars} timeout 10 skopeo inspect --tls-verify={tls} {creds} docker://{image}"
+    skopeo_example_command = "skopeo inspect [--tls-verify=false] [--creds=<user>:<pass>] docker://<registry>/<image>"
 
-    deployment_image_info = {
-        "origin": {
-            "namespace": "openshift",
-            "name": "origin",
-        },
-        "openshift-enterprise": {
-            "namespace": "openshift3",
-            "name": "ose",
-        },
-    }
+    def ensure_list(self, registry_param):
+        """Return the task var as a list."""
+        # https://bugzilla.redhat.com/show_bug.cgi?id=1497274
+        # If the result was a string type, place it into a list. We must do this
+        # as using list() on a string will split the string into its characters.
+        # Otherwise cast to a list as was done previously.
+        registry = self.get_var(registry_param, default=[])
+        if not isinstance(registry, six.string_types):
+            return list(registry)
+        return self.normalize(registry)
 
-    @classmethod
-    def is_active(cls, task_vars):
-        """Skip hosts with unsupported deployment types."""
-        deployment_type = get_var(task_vars, "openshift_deployment_type")
-        has_valid_deployment_type = deployment_type in cls.deployment_image_info
+    def __init__(self, *args, **kwargs):
+        super(DockerImageAvailability, self).__init__(*args, **kwargs)
 
-        return super(DockerImageAvailability, cls).is_active(task_vars) and has_valid_deployment_type
+        self.registries_insecure = set(self.ensure_list(
+            "openshift_docker_insecure_registries"))
 
-    def run(self, tmp, task_vars):
-        msg, failed, changed = self.ensure_dependencies(task_vars)
+        # Retrieve and template registry credentials, if provided
+        self.skopeo_command_creds = None
+        oreg_auth_user = self.get_var('oreg_auth_user', default='')
+        oreg_auth_password = self.get_var('oreg_auth_password', default='')
+        if oreg_auth_user != '' and oreg_auth_password != '':
+            oreg_auth_user = self.template_var(oreg_auth_user)
+            oreg_auth_password = self.template_var(oreg_auth_password)
+            self.skopeo_command_creds = quote("--creds={}:{}".format(oreg_auth_user, oreg_auth_password))
 
-        # exit early if Skopeo update fails
-        if failed:
-            if "No package matching" in msg:
-                msg = "Ensure that all required dependencies can be installed via `yum`.\n"
-            return {
-                "failed": True,
-                "changed": changed,
-                "msg": (
-                    "Unable to update or install required dependency packages on this host;\n"
-                    "These are required in order to check Docker image availability:"
-                    "\n    {deps}\n{msg}"
-                ).format(deps=',\n    '.join(self.dependencies), msg=msg),
-            }
+        # take note of any proxy settings needed
+        proxies = []
+        for var in ['http_proxy', 'https_proxy', 'no_proxy']:
+            # ansible vars are openshift_http_proxy, openshift_https_proxy, openshift_no_proxy
+            value = self.get_var("openshift_" + var, default=None)
+            if value:
+                proxies.append(var.upper() + "=" + quote(self.template_var(value)))
+        self.skopeo_proxy_vars = " ".join(proxies)
 
-        required_images = self.required_images(task_vars)
-        missing_images = set(required_images) - set(self.local_images(required_images, task_vars))
+    def is_image_local(self, image):
+        """Check if image is already in local docker index."""
+        result = self.execute_module("docker_image_facts", {"name": image})
+        return bool(result.get("images")) and not result.get("failed")
+
+    def local_images(self, images):
+        """Filter a list of images and return those available locally."""
+        found_images = []
+        for image in images:
+            if self.is_image_local(image):
+                found_images.append(image)
+        return found_images
+
+    def is_available_skopeo_image(self, image):
+        """Use Skopeo to determine if required image exists"""
+        if six.PY2:
+            image = image.encode('utf8')
+        use_insecure = False
+        for insec_reg in self.registries_insecure:
+            if insec_reg in image:
+                use_insecure = True
+        args = dict(
+            proxyvars=self.skopeo_proxy_vars,
+            tls="false" if use_insecure else "true",
+            creds=self.skopeo_command_creds if self.skopeo_command_creds else "",
+            image=quote(image),
+        )
+
+        result = self.execute_module_with_retries("command", {
+            "_uses_shell": True,
+            "_raw_params": self.skopeo_command.format(**args),
+        })
+        if result.get("rc", 0) == 0 and not result.get("failed"):
+            return True
+
+        return False
+
+    def available_images(self, images):
+        """Search remotely for images. Returns: list of images found."""
+        return [
+            image for image in images
+            if self.is_available_skopeo_image(image)
+        ]
+
+    def run(self):
+        '''Run this check'''
+        required_images = self.template_var(
+            self.get_var('openshift_health_check_required_images'))
+
+        missing_images = set(required_images) - set(self.local_images(required_images))
 
         # exit early if all images were found locally
         if not missing_images:
-            return {"changed": changed}
+            return {}
 
-        registries = self.known_docker_registries(task_vars)
-        if not registries:
-            return {"failed": True, "msg": "Unable to retrieve any docker registries.", "changed": changed}
-
-        available_images = self.available_images(missing_images, registries, task_vars)
+        available_images = self.available_images(missing_images)
         unavailable_images = set(missing_images) - set(available_images)
 
         if unavailable_images:
-            return {
-                "failed": True,
-                "msg": (
-                    "One or more required Docker images are not available:\n    {}\n"
-                    "Configured registries: {}"
-                ).format(",\n    ".join(sorted(unavailable_images)), ", ".join(registries)),
-                "changed": changed,
-            }
+            missing = u",\n    ".join(sorted(unavailable_images))
 
-        return {"changed": changed}
+            msg = (
+                u"One or more required container images are not available:\n    {missing}\n"
+                "Checked with: {cmd}\n"
+            ).format(
+                missing=missing,
+                cmd=self.skopeo_example_command,
+            )
 
-    def required_images(self, task_vars):
-        deployment_type = get_var(task_vars, "openshift_deployment_type")
-        image_info = self.deployment_image_info[deployment_type]
+            return dict(failed=True, msg=msg.encode('utf8') if six.PY2 else msg)
 
-        openshift_release = get_var(task_vars, "openshift_release", default="latest")
-        openshift_image_tag = get_var(task_vars, "openshift_image_tag")
-        is_containerized = get_var(task_vars, "openshift", "common", "is_containerized")
-
-        images = set(self.required_docker_images(
-            image_info["namespace"],
-            image_info["name"],
-            ["registry-console"] if "enterprise" in deployment_type else [],  # include enterprise-only image names
-            openshift_release,
-            is_containerized,
-        ))
-
-        # append images with qualified image tags to our list of required images.
-        # these are images with a (v0.0.0.0) tag, rather than a standard release
-        # format tag (v0.0). We want to check this set in both containerized and
-        # non-containerized installations.
-        images.update(
-            self.required_qualified_docker_images(
-                image_info["namespace"],
-                image_info["name"],
-                openshift_image_tag,
-            ),
-        )
-
-        return images
-
-    @staticmethod
-    def required_docker_images(namespace, name, additional_image_names, version, is_containerized):
-        if is_containerized:
-            return ["{}/{}:{}".format(namespace, name, version)] if name else []
-
-        # include additional non-containerized images specific to the current deployment type
-        return ["{}/{}:{}".format(namespace, img_name, version) for img_name in additional_image_names]
-
-    @staticmethod
-    def required_qualified_docker_images(namespace, name, version):
-        # pylint: disable=invalid-name
-        return [
-            "{}/{}-{}:{}".format(namespace, name, suffix, version)
-            for suffix in ["haproxy-router", "docker-registry", "deployer", "pod"]
-        ]
-
-    def local_images(self, images, task_vars):
-        """Filter a list of images and return those available locally."""
-        return [
-            image for image in images
-            if self.is_image_local(image, task_vars)
-        ]
-
-    def is_image_local(self, image, task_vars):
-        result = self.module_executor("docker_image_facts", {"name": image}, task_vars)
-        if result.get("failed", False):
-            return False
-
-        return bool(result.get("images", []))
-
-    @staticmethod
-    def known_docker_registries(task_vars):
-        docker_facts = get_var(task_vars, "openshift", "docker")
-        regs = set(docker_facts["additional_registries"])
-
-        deployment_type = get_var(task_vars, "openshift_deployment_type")
-        if deployment_type == "origin":
-            regs.update(["docker.io"])
-        elif "enterprise" in deployment_type:
-            regs.update(["registry.access.redhat.com"])
-
-        return list(regs)
-
-    def available_images(self, images, registries, task_vars):
-        """Inspect existing images using Skopeo and return all images successfully inspected."""
-        return [
-            image for image in images
-            if any(self.is_available_skopeo_image(image, registry, task_vars) for registry in registries)
-        ]
-
-    def is_available_skopeo_image(self, image, registry, task_vars):
-        """Uses Skopeo to determine if required image exists in a given registry."""
-
-        cmd_str = "skopeo inspect docker://{registry}/{image}".format(
-            registry=registry,
-            image=image,
-        )
-
-        args = {"_raw_params": cmd_str}
-        result = self.module_executor("command", args, task_vars)
-        return not result.get("failed", False) and result.get("rc", 0) == 0
-
-    # ensures that the skopeo and python-docker-py packages exist
-    # check is skipped on atomic installations
-    def ensure_dependencies(self, task_vars):
-        if get_var(task_vars, "openshift", "common", "is_atomic"):
-            return "", False, False
-
-        result = self.module_executor("yum", {"name": self.dependencies, "state": "latest"}, task_vars)
-        return result.get("msg", ""), result.get("failed", False) or result.get("rc", 0) != 0, result.get("changed")
+        return {}

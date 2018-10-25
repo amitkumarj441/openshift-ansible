@@ -1,24 +1,20 @@
 ---
 - name: Install clients
-  package: name={{ openshift.common.service_type }}-clients state=present
-  when: not openshift.common.is_containerized | bool
+  package:
+    name: "{{ openshift_service_type }}-clients{{ openshift_pkg_version | default('') }}"
+    state: present
+  register: result
+  until: result is succeeded
 
-- name: Pull CLI Image
-  command: >
-    docker pull {{ openshift.common.cli_image }}:{{ openshift_image_tag }}
-  register: pull_result
-  changed_when: "'Downloaded newer image' in pull_result.stdout"
-  when: openshift.common.is_containerized | bool
-
-- name: Copy client binaries/symlinks out of CLI image for use on the host
-  openshift_container_binary_sync:
-    image: "{{ openshift.common.cli_image }}"
-    tag: "{{ openshift_image_tag }}"
-  when: openshift.common.is_containerized | bool
-
-- name: Reload facts to pick up installed OpenShift version
-  openshift_facts:
+- block:
+  - name: Pull CLI Image
+    docker_image:
+      name: "{{ openshift_cli_image }}"
+    when: not openshift_use_crio_only | bool
 
 - name: Install bash completion for oc tools
-  package: name=bash-completion state=present
-  when: not openshift.common.is_containerized | bool
+  package:
+    name: bash-completion
+    state: present
+  register: result
+  until: result is succeeded

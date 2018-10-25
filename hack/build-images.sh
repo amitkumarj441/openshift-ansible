@@ -7,7 +7,7 @@ set -o pipefail
 STARTTIME=$(date +%s)
 source_root=$(dirname "${0}")/..
 
-prefix="openshift/openshift-ansible"
+prefix="openshift/origin-ansible"
 version="latest"
 verbose=false
 options="-f images/installer/Dockerfile"
@@ -36,7 +36,7 @@ done
 
 # allow ENV to take precedent over switches
 prefix="${PREFIX:-$prefix}"
-version="${OS_TAG:-$version}" 
+version="${OS_TAG:-$version}"
 
 if [ "$help" = true ]; then
   echo "Builds the docker images for openshift-ansible"
@@ -44,12 +44,12 @@ if [ "$help" = true ]; then
   echo "Options: "
   echo "  --prefix=PREFIX"
   echo "  The prefix to use for the image names."
-  echo "  default: openshift/openshift-ansible"
+  echo "  default: docker.io/openshift/origin-ansible"
   echo
   echo "  --version=VERSION"
-  echo "  The version used to tag the image"
+  echo "  The version used to tag the image (can be a comma-separated list)"
   echo "  default: latest"
-  echo 
+  echo
   echo "  --no-cache"
   echo "  If set will perform the build without a cache."
   echo
@@ -62,25 +62,33 @@ if [ "$help" = true ]; then
   exit 0
 fi
 
+
 if [ "$verbose" = true ]; then
   set -x
 fi
 
 BUILD_STARTTIME=$(date +%s)
 comp_path=$source_root/
-docker_tag=${prefix}:${version}
+
+# turn comma-separated versions into -t args for docker build
+IFS=',' read -r -a version_arr <<< "$version"
+docker_tags=()
+for tag in "${version_arr[@]}"; do
+  docker_tags+=("-t" "${prefix}:${tag}")
+done
+
 echo
 echo
-echo "--- Building component '$comp_path' with docker tag '$docker_tag' ---"
-docker build ${options} -t $docker_tag $comp_path
-BUILD_ENDTIME=$(date +%s); echo "--- $docker_tag took $(($BUILD_ENDTIME - $BUILD_STARTTIME)) seconds ---"
+echo "--- Building component '$comp_path' with docker tag(s) '$version' ---"
+docker build ${options} "${docker_tags[@]}" $comp_path
+BUILD_ENDTIME=$(date +%s); echo "--- ${version} took $(($BUILD_ENDTIME - $BUILD_STARTTIME)) seconds ---"
 echo
 echo
 
 echo
 echo
 echo "++ Active images"
-docker images | grep ${prefix} | grep ${version} | sort
+docker images | grep ${prefix} | sort
 echo
 
 

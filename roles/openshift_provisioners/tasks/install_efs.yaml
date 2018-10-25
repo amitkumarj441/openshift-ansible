@@ -1,7 +1,7 @@
 ---
 - name: Check efs current replica count
   command: >
-    {{ openshift.common.client_binary }} --config={{ mktemp.stdout }}/admin.kubeconfig get dc provisioners-efs
+    {{ openshift_client_binary }} --config={{ mktemp.stdout }}/admin.kubeconfig get dc provisioners-efs
     -o jsonpath='{.spec.replicas}' -n {{openshift_provisioners_project}}
   register: efs_replica_count
   when: not ansible_check_mode
@@ -9,7 +9,9 @@
   changed_when: no
 
 - name: Generate efs PersistentVolumeClaim
-  template: src=pvc.j2 dest={{mktemp.stdout}}/templates/{{obj_name}}-pvc.yaml
+  template:
+    src: pvc.j2
+    dest: "{{ mktemp.stdout }}/templates/{{ obj_name }}-pvc.yaml"
   vars:
     obj_name: "provisioners-efs"
     size: "1Mi"
@@ -21,7 +23,9 @@
   changed_when: no
 
 - name: Generate efs PersistentVolume
-  template: src=pv.j2 dest={{mktemp.stdout}}/templates/{{obj_name}}-pv.yaml
+  template:
+    src: pv.j2
+    dest: "{{ mktemp.stdout }}/templates/{{ obj_name }}-pv.yaml"
   vars:
     obj_name: "provisioners-efs"
     size: "1Mi"
@@ -54,7 +58,7 @@
 # anyuid in order to run as root & chgrp shares with allocated gids
 - name: "Check efs anyuid permissions"
   command: >
-    {{ openshift.common.client_binary }} --config={{ mktemp.stdout }}/admin.kubeconfig
+    {{ openshift_client_binary }} --config={{ mktemp.stdout }}/admin.kubeconfig
     get scc/anyuid -o jsonpath='{.users}'
   register: efs_anyuid
   check_mode: no
@@ -62,9 +66,9 @@
 
 - name: "Set anyuid permissions for efs"
   command: >
-    {{ openshift.common.admin_binary}} --config={{ mktemp.stdout }}/admin.kubeconfig policy
+    {{ openshift_client_binary}} adm --config={{ mktemp.stdout }}/admin.kubeconfig policy
     add-scc-to-user anyuid system:serviceaccount:{{openshift_provisioners_project}}:provisioners-efs
   register: efs_output
   failed_when: efs_output.rc == 1 and 'exists' not in efs_output.stderr
   check_mode: no
-  when: efs_anyuid.stdout.find("system:serviceaccount:{{openshift_provisioners_project}}:provisioners-efs") == -1
+  when: efs_anyuid.stdout.find("system:serviceaccount:" + openshift_provisioners_project + ":provisioners-efs") == -1

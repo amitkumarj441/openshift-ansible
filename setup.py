@@ -29,6 +29,7 @@ def find_files(base_dir, exclude_dirs, include_dirs, file_regex):
     if exclude_dirs is not None:
         exclude_regex = r'|'.join([fnmatch.translate(x) for x in exclude_dirs]) or r'$.'
 
+    # Don't use include_dirs, it is broken
     if include_dirs is not None:
         include_regex = r'|'.join([fnmatch.translate(x) for x in include_dirs]) or r'$.'
 
@@ -45,6 +46,58 @@ def find_files(base_dir, exclude_dirs, include_dirs, file_regex):
         found.extend(matches)
 
     return found
+
+
+def recursive_search(search_list, field):
+    """
+    Takes a list with nested dicts, and searches all dicts for a key of the
+    field provided.  If the items in the list are not dicts, the items are not
+    processed.
+    """
+    fields_found = []
+
+    for item in search_list:
+        if isinstance(item, dict):
+            for key, value in item.items():
+                if key == field:
+                    fields_found.append(value)
+                elif isinstance(value, list):
+                    results = recursive_search(value, field)
+                    for result in results:
+                        fields_found.append(result)
+
+    return fields_found
+
+
+def find_playbooks():
+    ''' find Ansible playbooks'''
+    all_playbooks = set()
+    included_playbooks = set()
+
+    exclude_dirs = ('adhoc', 'tasks', 'ovirt')
+    for yaml_file in find_files(
+            os.path.join(os.getcwd(), 'playbooks'),
+            exclude_dirs, None, r'^[^\.].*\.ya?ml$'):
+        with open(yaml_file, 'r') as contents:
+            for task in yaml.safe_load(contents) or {}:
+                if not isinstance(task, dict):
+                    # Skip yaml files which are not a dictionary of tasks
+                    continue
+                if 'include' in task or 'import_playbook' in task:
+                    # Add the playbook and capture included playbooks
+                    all_playbooks.add(yaml_file)
+                    if 'include' in task:
+                        directive = task['include']
+                    else:
+                        directive = task['import_playbook']
+                    included_file_name = directive.split()[0]
+                    included_file = os.path.normpath(
+                        os.path.join(os.path.dirname(yaml_file),
+                                     included_file_name))
+                    included_playbooks.add(included_file)
+                elif 'hosts' in task:
+                    all_playbooks.add(yaml_file)
+    return all_playbooks, included_playbooks
 
 
 class OpenShiftAnsibleYamlLint(Command):
@@ -98,7 +151,7 @@ class OpenShiftAnsibleYamlLint(Command):
         else:
             format_method = Format.standard_color
 
-        for yaml_file in find_files(os.getcwd(), self.excludes, None, r'\.ya?ml$'):
+        for yaml_file in find_files(os.getcwd(), self.excludes, None, r'^[^\.].*\.ya?ml$'):
             first = True
             with open(yaml_file, 'r') as contents:
                 for problem in linter.run(contents, config):
@@ -113,7 +166,7 @@ class OpenShiftAnsibleYamlLint(Command):
                         has_warnings = True
 
         if has_errors or has_warnings:
-            print('yammlint issues found')
+            print('yamllint issues found')
             raise SystemExit(1)
 
 
@@ -126,7 +179,7 @@ class OpenShiftAnsiblePylint(PylintCommand):
     # pylint: disable=no-self-use
     def find_all_modules(self):
         ''' find all python files to test '''
-        exclude_dirs = ['.tox', 'utils', 'test', 'tests', 'git']
+        exclude_dirs = ('.tox', 'test', 'tests', 'git')
         modules = []
         for match in find_files(os.getcwd(), exclude_dirs, None, r'\.py$'):
             package = os.path.basename(match).replace('.py', '')
@@ -169,8 +222,7 @@ class OpenShiftAnsibleGenerateValidation(Command):
         generate_files = find_files('roles',
                                     ['inventory',
                                      'test',
-                                     'playbooks',
-                                     'utils'],
+                                     'playbooks'],
                                     None,
                                     'generate.py$')
 
@@ -206,7 +258,7 @@ class OpenShiftAnsibleSyntaxCheck(Command):
     user_options = []
 
     # Colors
-    FAIL = '\033[91m'  # Red
+    FAIL = '\033[31m'  # Red
     ENDC = '\033[0m'  # Reset
 
     def initialize_options(self):
@@ -217,31 +269,139 @@ class OpenShiftAnsibleSyntaxCheck(Command):
         ''' finalize_options '''
         pass
 
+    def deprecate_jinja2_in_when(self, yaml_contents, yaml_file):
+        ''' Check for Jinja2 templating delimiters in when conditions '''
+        test_result = False
+        failed_items = []
+
+        search_results = recursive_search(yaml_contents, 'when')
+        search_results.append(recursive_search(yaml_contents, 'failed_when'))
+        for item in search_results:
+            if isinstance(item, str):
+                if '{{' in item or '{%' in item:
+                    failed_items.append(item)
+            else:
+                for sub_item in item:
+                    if isinstance(sub_item, bool):
+                        continue
+                    if '{{' in sub_item or '{%' in sub_item:
+                        failed_items.append(sub_item)
+
+        if len(failed_items) > 0:
+            print('{}Error: Usage of Jinja2 templating delimiters in when '
+                  'conditions is deprecated in Ansible 2.3.\n'
+                  '  File: {}'.format(self.FAIL, yaml_file))
+            for item in failed_items:
+                print('  Found: "{}"'.format(item))
+            print(self.ENDC)
+            test_result = True
+
+        return test_result
+
+    def deprecate_include(self, yaml_contents, yaml_file):
+        ''' Check for usage of include directive '''
+        test_result = False
+
+        search_results = recursive_search(yaml_contents, 'include')
+
+        if len(search_results) > 0:
+            print('{}Error: The `include` directive is deprecated in Ansible 2.4.\n'
+                  'https://github.com/ansible/ansible/blob/devel/CHANGELOG.md\n'
+                  '  File: {}'.format(self.FAIL, yaml_file))
+            for item in search_results:
+                print('  Found: "include: {}"'.format(item))
+            print(self.ENDC)
+            test_result = True
+
+        return test_result
+
     def run(self):
         ''' run command '''
 
         has_errors = False
 
+        print('#' * 60)
+        print('Ansible Deprecation Checks')
+        exclude_dirs = ('adhoc', 'files', 'meta', 'vars', 'defaults', '.tox')
         for yaml_file in find_files(
-                os.path.join(os.getcwd(), 'playbooks', 'byo'),
-                None, None, r'\.ya?ml$'):
+                os.getcwd(), exclude_dirs, None, r'^[^\.].*\.ya?ml$'):
             with open(yaml_file, 'r') as contents:
-                for line in contents:
-                    # initialize_groups.yml is used to identify entry point playbooks
-                    if re.search(r'initialize_groups\.yml', line):
-                        print('-' * 60)
-                        print('Syntax checking playbook: %s' % yaml_file)
-                        try:
-                            subprocess.check_output(
-                                ['ansible-playbook', '-i localhost,',
-                                 '--syntax-check', yaml_file]
-                            )
-                        except subprocess.CalledProcessError as cpe:
-                            print('{}Execution failed: {}{}'.format(
-                                self.FAIL, cpe, self.ENDC))
-                            has_errors = True
-                        # Break for loop, no need to continue looping lines
-                        break
+                yaml_contents = yaml.safe_load(contents)
+                if not isinstance(yaml_contents, list):
+                    continue
+
+                # Check for Jinja2 templating delimiters in when conditions
+                result = self.deprecate_jinja2_in_when(yaml_contents, yaml_file)
+                has_errors = result or has_errors
+
+                # Check for usage of include: directive
+                result = self.deprecate_include(yaml_contents, yaml_file)
+                has_errors = result or has_errors
+
+        if not has_errors:
+            print('...PASSED')
+
+        all_playbooks, included_playbooks = find_playbooks()
+
+        print('#' * 60)
+        print('Invalid Playbook Include Checks')
+        invalid_include = []
+        for playbook in included_playbooks:
+            # Ignore imported playbooks in 'common', 'private' and 'init'. It is
+            # expected that these locations would be imported by entry point
+            # playbooks.
+            # Ignore playbooks in 'aws', 'azure', 'gcp' and 'openstack' because these
+            # playbooks do not follow the same component entry point structure.
+            # Ignore deploy_cluster.yml and prerequisites.yml because these are
+            # entry point playbooks but are imported by playbooks in the cloud
+            # provisioning playbooks.
+            ignored = ('common', 'private', 'init',
+                       'aws', 'azure', 'gcp', 'openstack',
+                       'deploy_cluster.yml', 'prerequisites.yml')
+            if any(x in playbook for x in ignored):
+                continue
+            invalid_include.append(playbook)
+        if invalid_include:
+            print('{}Invalid included playbook(s) found. Please ensure'
+                  ' component entry point playbooks are not included{}'.format(self.FAIL, self.ENDC))
+            invalid_include.sort()
+            for playbook in invalid_include:
+                print('{}{}{}'.format(self.FAIL, playbook, self.ENDC))
+            has_errors = True
+
+        if not has_errors:
+            print('...PASSED')
+
+        print('#' * 60)
+        print('Ansible Playbook Entry Point Syntax Checks')
+        # Evaluate the difference between all playbooks and included playbooks
+        entrypoint_playbooks = sorted(all_playbooks.difference(included_playbooks))
+        print('Entry point playbook count: {}'.format(len(entrypoint_playbooks)))
+        for playbook in entrypoint_playbooks:
+            print('-' * 60)
+            print('Syntax checking playbook: {}'.format(playbook))
+
+            # Error on any entry points in 'common' or 'private'
+            invalid_entry_point = ('common', 'private')
+            if any(x in playbook for x in invalid_entry_point):
+                print('{}Invalid entry point playbook or orphaned file. Entry'
+                      ' point playbooks are not allowed in \'common\' or'
+                      ' \'private\' directories{}'.format(self.FAIL, self.ENDC))
+                has_errors = True
+
+            # --syntax-check each entry point playbook
+            try:
+                # Create a host group list to avoid WARNING on unmatched host patterns
+                tox_ansible_inv = os.environ['TOX_ANSIBLE_INV_PATH']
+                subprocess.check_output(
+                    ['ansible-playbook', '-i', tox_ansible_inv,
+                     '--syntax-check', playbook, '-e', '@{}_extras'.format(tox_ansible_inv)]
+                )
+            except subprocess.CalledProcessError as cpe:
+                print('{}Execution failed: {}{}'.format(
+                    self.FAIL, cpe, self.ENDC))
+                has_errors = True
+
         if has_errors:
             raise SystemExit(1)
 

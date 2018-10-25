@@ -30,11 +30,13 @@
 
 from __future__ import print_function  # noqa: F401
 import copy  # noqa: F401
-import json  # noqa: F401
+import fcntl  # noqa: F401
+import json   # noqa: F401
 import os  # noqa: F401
 import re  # noqa: F401
 import shutil  # noqa: F401
 import tempfile  # noqa: F401
+import time  # noqa: F401
 
 try:
     import ruamel.yaml as yaml  # noqa: F401
@@ -534,7 +536,7 @@ class Repoquery(RepoqueryCLI):
             with open("/etc/yum.conf", "r") as file_handler:
                 yum_conf_lines = file_handler.readlines()
 
-            yum_conf_lines = ["exclude=" if l.startswith("exclude=") else l for l in yum_conf_lines]
+            yum_conf_lines = [l for l in yum_conf_lines if not l.startswith("exclude=")]
 
             with open(self.tmp_file.name, "w") as file_handler:
                 file_handler.writelines(yum_conf_lines)
@@ -545,13 +547,13 @@ class Repoquery(RepoqueryCLI):
         rval = self._repoquery_cmd(repoquery_cmd, True, 'raw')
 
         # check to see if there are actual results
+        rval['package_name'] = self.name
         if rval['results']:
             processed_versions = Repoquery.process_versions(rval['results'].strip())
             formatted_versions = self.format_versions(processed_versions)
 
             rval['package_found'] = True
             rval['versions'] = formatted_versions
-            rval['package_name'] = self.name
 
             if self.verbose:
                 rval['raw_versions'] = processed_versions
@@ -618,17 +620,22 @@ def main():
             show_duplicates=dict(default=False, required=False, type='bool'),
             match_version=dict(default=None, required=False, type='str'),
             ignore_excluders=dict(default=False, required=False, type='bool'),
+            retries=dict(default=4, required=False, type='int'),
+            retry_interval=dict(default=5, required=False, type='int'),
         ),
         supports_check_mode=False,
         required_if=[('show_duplicates', True, ['name'])],
     )
 
-    rval = Repoquery.run_ansible(module.params, module.check_mode)
-
-    if 'failed' in rval:
-        module.fail_json(**rval)
-
-    module.exit_json(**rval)
+    tries = 1
+    while True:
+        rval = Repoquery.run_ansible(module.params, module.check_mode)
+        if 'failed' not in rval:
+            module.exit_json(**rval)
+        elif tries > module.params['retries']:
+            module.fail_json(**rval)
+        tries += 1
+        time.sleep(module.params['retry_interval'])
 
 
 if __name__ == "__main__":

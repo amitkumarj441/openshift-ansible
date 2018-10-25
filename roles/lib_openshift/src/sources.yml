@@ -9,6 +9,16 @@ oc_adm_ca_server_cert.py:
 - class/oc_adm_ca_server_cert.py
 - ansible/oc_adm_ca_server_cert.py
 
+oc_adm_csr.py:
+- doc/generated
+- doc/license
+- lib/import.py
+- doc/csr
+- ../../lib_utils/src/class/yedit.py
+- lib/base.py
+- class/oc_adm_csr.py
+- ansible/oc_adm_csr.py
+
 oc_adm_manage_node.py:
 - doc/generated
 - doc/license
@@ -72,12 +82,6 @@ oc_adm_router.py:
 - lib/rolebinding.py
 - class/oc_adm_router.py
 - ansible/oc_adm_router.py
-
-oc_atomic_container.py:
-- doc/generated
-- doc/license
-- doc/atomic_container
-- ansible/oc_atomic_container.py
 
 oc_configmap.py:
 - doc/generated
@@ -262,6 +266,17 @@ oc_service.py:
 - lib/service.py
 - class/oc_service.py
 - ansible/oc_service.py
+
+oc_storageclass.py:
+- doc/generated
+- doc/license
+- lib/import.py
+- doc/storageclass
+- ../../lib_utils/src/class/yedit.py
+- lib/base.py
+- lib/storageclass.py
+- class/oc_storageclass.py
+- ansible/oc_storageclass.py
 
 oc_user.py:
 - doc/generated

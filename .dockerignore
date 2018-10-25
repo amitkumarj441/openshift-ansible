@@ -1,8 +1,11 @@
 .*
 bin
 docs
-test
+hack
+inventory/hosts.*
 utils
 **/*.md
 *.spec
+*.ini
+*.txt
 setup*

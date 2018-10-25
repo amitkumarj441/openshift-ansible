@@ -1,166 +1,117 @@
 ---
+- name: Make sure heketi-client is installed
+  package:
+    name: heketi-client
+    state: present
+  when:
+  - not glusterfs_heketi_is_native | bool
+  register: result
+  until: result is succeeded
+
+- name: Verify heketi-cli is installed
+  shell: "command -v {{ glusterfs_heketi_cli }} >/dev/null 2>&1 || { echo >&2 'ERROR: Make sure heketi-cli is available, then re-run the installer'; exit 1; }"
+  changed_when: False
+  when:
+  - not glusterfs_heketi_is_native | bool
+
 - name: Verify target namespace exists
   oc_project:
     state: present
     name: "{{ glusterfs_namespace }}"
-  when: glusterfs_is_native or glusterfs_heketi_is_native
+    node_selector: "{% if glusterfs_use_default_selector %}{{ omit }}{% endif %}"
+  when: glusterfs_is_native or glusterfs_heketi_is_native or glusterfs_storageclass
 
-- include: glusterfs_deploy.yml
-  when: glusterfs_is_native
-
-- name: Make sure heketi-client is installed
-  package: name=heketi-client state=present
-
-- name: Delete pre-existing heketi resources
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    kind: "{{ item.kind }}"
-    name: "{{ item.name | default(omit) }}"
-    selector: "{{ item.selector | default(omit) }}"
-    state: absent
-  with_items:
-  - kind: "template,route,service,dc,jobs,secret"
-    selector: "deploy-heketi"
-  - kind: "template,route,service,dc"
-    name: "heketi"
-  - kind: "svc,ep"
-    name: "heketi-storage-endpoints"
-  - kind: "sa"
-    name: "heketi-service-account"
-  failed_when: False
-  when: glusterfs_heketi_wipe
-
-- name: Wait for deploy-heketi pods to terminate
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    kind: pod
-    state: list
-    selector: "glusterfs=deploy-heketi-pod"
-  register: heketi_pod
-  until: "heketi_pod.results.results[0]['items'] | count == 0"
-  delay: 10
-  retries: "{{ (glusterfs_timeout / 10) | int }}"
-  when: glusterfs_heketi_wipe
-
-- name: Wait for heketi pods to terminate
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    kind: pod
-    state: list
-    selector: "glusterfs=heketi-pod"
-  register: heketi_pod
-  until: "heketi_pod.results.results[0]['items'] | count == 0"
-  delay: 10
-  retries: "{{ (glusterfs_timeout / 10) | int }}"
-  when: glusterfs_heketi_wipe
-
-- name: Create heketi service account
-  oc_serviceaccount:
-    namespace: "{{ glusterfs_namespace }}"
-    name: heketi-service-account
-    state: present
-  when: glusterfs_heketi_is_native
-
-- name: Add heketi service account to privileged SCC
+- name: Add namespace service accounts to privileged SCC
   oc_adm_policy_user:
-    user: "system:serviceaccount:{{ glusterfs_namespace }}:heketi-service-account"
+    user: "system:serviceaccount:{{ glusterfs_namespace }}:{{ item }}"
     resource_kind: scc
     resource_name: privileged
     state: present
-  when: glusterfs_heketi_is_native
+  with_items:
+  - 'default'
+  - 'router'
+  when: glusterfs_is_native or glusterfs_heketi_is_native
 
-- name: Allow heketi service account to view/edit pods
-  oc_adm_policy_user:
-    user: "system:serviceaccount:{{ glusterfs_namespace }}:heketi-service-account"
-    resource_kind: role
-    resource_name: edit
-    state: present
-  when: glusterfs_heketi_is_native
+- import_tasks: glusterfs_deploy.yml
+  when: glusterfs_is_native
 
-- name: Check for existing deploy-heketi pod
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    state: list
-    kind: pod
-    selector: "glusterfs=deploy-heketi-pod,deploy-heketi=support"
-  register: heketi_pod
-  when: glusterfs_heketi_is_native
-
-- name: Check if need to deploy deploy-heketi
-  set_fact:
-    glusterfs_heketi_deploy_is_missing: False
+- name: Start glusterd (external)
+  service:
+    name: glusterd
+    state: started
+    enabled: yes
+  delegate_to: "{{ item }}"
+  with_items: "{{ glusterfs_nodes | default([]) }}"
   when:
-  - "glusterfs_heketi_is_native"
-  - "heketi_pod.results.results[0]['items'] | count > 0"
-  # deploy-heketi is not missing when there are one or more pods with matching labels whose 'Ready' status is True
-  - "heketi_pod.results.results[0]['items'] | oo_collect(attribute='status.conditions') | oo_collect(attribute='status', filters={'type': 'Ready'}) | map('bool') | select | list | count > 0"
+  - not glusterfs_is_native | bool
 
-- name: Check for existing heketi pod
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    state: list
-    kind: pod
-    selector: "glusterfs=heketi-pod"
-  register: heketi_pod
+- import_tasks: heketi_setup.yml
   when: glusterfs_heketi_is_native
 
-- name: Check if need to deploy heketi
-  set_fact:
-    glusterfs_heketi_is_missing: False
-  when:
-  - "glusterfs_heketi_is_native"
-  - "heketi_pod.results.results[0]['items'] | count > 0"
-  # heketi is not missing when there are one or more pods with matching labels whose 'Ready' status is True
-  - "heketi_pod.results.results[0]['items'] | oo_collect(attribute='status.conditions') | oo_collect(attribute='status', filters={'type': 'Ready'}) | map('bool') | select | list | count > 0"
+# This must always be run. There are tasks further on in the play that require
+# require these variables to be properly set, even if the tasks are skipped, so
+# that Ansible can properly parse the tasks.
+- import_tasks: heketi_pod_check.yml
 
-- include: heketi_deploy_part1.yml
+- import_tasks: heketi_init_deploy.yml
   when:
   - glusterfs_heketi_is_native
   - glusterfs_heketi_deploy_is_missing
   - glusterfs_heketi_is_missing
 
-- name: Determine heketi URL
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    state: list
-    kind: ep
-    selector: "glusterfs in (deploy-heketi-service, heketi-service)"
-  register: heketi_url
-  until:
-  - "heketi_url.results.results[0]['items'][0].subsets[0].addresses[0].ip != ''"
-  - "heketi_url.results.results[0]['items'][0].subsets[0].ports[0].port != ''"
-  delay: 10
-  retries: "{{ (glusterfs_timeout / 10) | int }}"
-  when:
-  - glusterfs_heketi_is_native
-  - glusterfs_heketi_url is undefined
-
-- name: Set heketi URL
-  set_fact:
-    glusterfs_heketi_url: "{{ heketi_url.results.results[0]['items'][0].subsets[0].addresses[0].ip }}:{{ heketi_url.results.results[0]['items'][0].subsets[0].ports[0].port }}"
-  when:
-  - glusterfs_heketi_is_native
-  - glusterfs_heketi_url is undefined
-
-- name: Verify heketi service
-  command: "heketi-cli -s http://{{ glusterfs_heketi_url }} --user admin --secret '{{ glusterfs_heketi_admin_key }}' cluster list"
-  changed_when: False
-
-- name: Generate topology file
-  template:
-    src: "{{ openshift.common.examples_content_version }}/topology.json.j2"
-    dest: "{{ mktemp.stdout }}/topology.json"
+- import_tasks: heketi_load.yml
   when:
   - glusterfs_heketi_topology_load
 
-- name: Load heketi topology
-  command: "heketi-cli -s http://{{ glusterfs_heketi_url }} --user admin --secret '{{ glusterfs_heketi_admin_key }}' topology load --json={{ mktemp.stdout }}/topology.json 2>&1"
-  register: topology_load
-  failed_when: "topology_load.rc != 0 or 'Unable' in topology_load.stdout"
+- import_tasks: heketi_init_db.yml
   when:
+  - glusterfs_heketi_is_native
+  - not glusterfs_heketi_deploy_is_missing
+  - glusterfs_heketi_is_missing
   - glusterfs_heketi_topology_load
 
-- include: heketi_deploy_part2.yml
+- import_tasks: heketi_deploy.yml
   when:
   - glusterfs_heketi_is_native
   - glusterfs_heketi_is_missing
+
+- block:
+  - name: Create heketi secret
+    oc_secret:
+      namespace: "{{ glusterfs_namespace }}"
+      state: present
+      name: "heketi-{{ glusterfs_name }}-admin-secret"
+      type: "kubernetes.io/glusterfs"
+      force: True
+      contents:
+      - path: key
+        data: "{{ glusterfs_heketi_admin_key }}"
+    when:
+    - glusterfs_heketi_admin_key is defined
+
+  - name: Generate GlusterFS StorageClass file
+    template:
+      src: "glusterfs-storageclass.yml.j2"
+      dest: "{{ mktemp.stdout }}/glusterfs-storageclass.yml"
+
+  - name: Create GlusterFS StorageClass
+    oc_obj:
+      state: present
+      kind: storageclass
+      name: "glusterfs-{{ glusterfs_name }}"
+      files:
+      - "{{ mktemp.stdout }}/glusterfs-storageclass.yml"
+  when: glusterfs_storageclass
+
+- import_tasks: glusterblock_deploy.yml
+  when: glusterfs_block_deploy
+
+- import_tasks: glusterblock_storageclass.yml
+  when: glusterfs_block_storageclass
+
+- import_tasks: gluster_s3_deploy.yml
+  when:
+  - glusterfs_s3_deploy
+  - glusterfs_s3_account is defined
+  - glusterfs_s3_user is defined
+  - glusterfs_s3_password is defined

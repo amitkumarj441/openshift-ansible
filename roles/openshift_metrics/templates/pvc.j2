@@ -7,17 +7,24 @@ metadata:
     metrics-infra: support
 {% elif labels %}
   labels:
-{% for key, value in labels.iteritems() %}
+{% for key, value in labels.items() %}
     {{ key }}: {{ value }}
 {% endfor %}
 {% endif %}
 {% if annotations is defined and annotations %}
   annotations:
-{% for key,value in annotations.iteritems() %}
+{% for key,value in annotations.items() %}
     {{key}}: {{value}}
 {% endfor %}
 {% endif %}
 spec:
+{% if pv_selector is defined and pv_selector is mapping %}
+  selector:
+    matchLabels:
+{% for key,value in pv_selector.items() %}
+      {{key}}: {{value}}
+{% endfor %}
+{% endif %}
   accessModes:
 {% for mode in access_modes %}
     - {{ mode }}
@@ -25,3 +32,6 @@ spec:
   resources:
     requests:
       storage: {{size}}
+{% if storage_class_name is defined %}
+  storageClassName: {{ storage_class_name }}
+{% endif %}

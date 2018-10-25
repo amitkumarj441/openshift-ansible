@@ -14,17 +14,19 @@ class OCObject(OpenShiftCLI):
                  selector=None,
                  kubeconfig='/etc/origin/master/admin.kubeconfig',
                  verbose=False,
-                 all_namespaces=False):
+                 all_namespaces=False,
+                 field_selector=None):
         ''' Constructor for OpenshiftOC '''
         super(OCObject, self).__init__(namespace, kubeconfig=kubeconfig, verbose=verbose,
                                        all_namespaces=all_namespaces)
         self.kind = kind
         self.name = name
         self.selector = selector
+        self.field_selector = field_selector
 
     def get(self):
         '''return a kind by name '''
-        results = self._get(self.kind, name=self.name, selector=self.selector)
+        results = self._get(self.kind, name=self.name, selector=self.selector, field_selector=self.field_selector)
         if (results['returncode'] != 0 and 'stderr' in results and
                 '\"{}\" not found'.format(self.name) in results['stderr']):
             results['returncode'] = 0
@@ -33,7 +35,12 @@ class OCObject(OpenShiftCLI):
 
     def delete(self):
         '''delete the object'''
-        return self._delete(self.kind, name=self.name, selector=self.selector)
+        results = self._delete(self.kind, name=self.name, selector=self.selector)
+        if (results['returncode'] != 0 and 'stderr' in results and
+                '\"{}\" not found'.format(self.name) in results['stderr']):
+            results['returncode'] = 0
+
+        return results
 
     def create(self, files=None, content=None):
         '''
@@ -45,7 +52,16 @@ class OCObject(OpenShiftCLI):
         if files:
             return self._create(files[0])
 
-        content['data'] = yaml.dump(content['data'])
+        # pylint: disable=no-member
+        # The purpose of this change is twofold:
+        # - we need a check to only use the ruamel specific dumper if ruamel is loaded
+        # - the dumper or the flow style change is needed so openshift is able to parse
+        # the resulting yaml, at least until gopkg.in/yaml.v2 is updated
+        if hasattr(yaml, 'RoundTripDumper'):
+            content['data'] = yaml.dump(content['data'], Dumper=yaml.RoundTripDumper)
+        else:
+            content['data'] = yaml.safe_dump(content['data'], default_flow_style=False)
+
         content_file = Utils.create_tmp_files_from_contents(content)[0]
 
         return self._create(content_file['path'])
@@ -91,7 +107,7 @@ class OCObject(OpenShiftCLI):
     # pylint: disable=too-many-return-statements,too-many-branches
     @staticmethod
     def run_ansible(params, check_mode=False):
-        '''perform the ansible idempotent code'''
+        '''run the oc_obj module'''
 
         ocobj = OCObject(params['kind'],
                          params['namespace'],
@@ -99,7 +115,8 @@ class OCObject(OpenShiftCLI):
                          params['selector'],
                          kubeconfig=params['kubeconfig'],
                          verbose=params['debug'],
-                         all_namespaces=params['all_namespaces'])
+                         all_namespaces=params['all_namespaces'],
+                         field_selector=params['field_selector'])
 
         state = params['state']
 
@@ -109,15 +126,20 @@ class OCObject(OpenShiftCLI):
         # Get
         #####
         if state == 'list':
+            if api_rval['returncode'] != 0:
+                return {'changed': False, 'failed': True, 'msg': api_rval}
             return {'changed': False, 'results': api_rval, 'state': state}
 
         ########
         # Delete
         ########
         if state == 'absent':
-            # verify its not in our results
+            # verify it's not in our results
+            # pylint: disable=too-many-boolean-expressions
             if (params['name'] is not None or params['selector'] is not None) and \
-               (len(api_rval['results']) == 0 or len(api_rval['results'][0].get('items', [])) == 0):
+               (len(api_rval['results']) == 0 or \
+               (not api_rval['results'][0]) or \
+               ('items' in api_rval['results'][0] and len(api_rval['results'][0]['items']) == 0)):
                 return {'changed': False, 'state': state}
 
             if check_mode:

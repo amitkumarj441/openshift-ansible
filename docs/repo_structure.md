@@ -6,34 +6,35 @@
 .
 ├── inventory           Contains dynamic inventory scripts, and examples of
 │                       Ansible inventories.
-├── library             Contains Python modules used by the playbooks.
 ├── playbooks           Contains Ansible playbooks targeting multiple use cases.
 └── roles               Contains Ansible roles, units of shared behavior among
                         playbooks.
 ```
 
-#### Ansible plugins
+#### Ansible shared libraries and plugins
 
-These are plugins used in playbooks and roles:
+Shared libraries and plugins are located in the `lib_utils` role.
 
-```
-.
-├── ansible-profile
-├── callback_plugins
-├── filter_plugins
-└── lookup_plugins
-```
+#### Ansible playbooks
+
+The `playbooks` directory is organized such that entry point playbooks are
+located in either component sub directories or cloud provisioning subdirectories.
+
+_Cloud Provisioning_
+- aws
+- gcp
+- openstack
+
+_OpenShift Components_
+- openshift-etcd
+- openshift-master
+- openshift-node
+- openshift-<component_name>
 
 ### Scripts
 
 ```
 .
-├── bin                 [DEPRECATED] Contains the `bin/cluster` script, a
-│                       wrapper around the Ansible playbooks that ensures proper
-│                       configuration, and facilitates installing, updating,
-│                       destroying and configuring OpenShift clusters.
-│                       Note: this tool is kept in the repository for legacy
-│                       reasons and will be removed at some point.
 └── utils               Contains the `atomic-openshift-installer` command, an
                         interactive CLI utility to install OpenShift across a
                         set of hosts.
@@ -51,4 +52,19 @@ These are plugins used in playbooks and roles:
 ```
 .
 └── test                Contains tests.
+```
+
+### CI
+
+These files are used by [PAPR](https://github.com/projectatomic/papr),
+It is very similar in workflow to Travis, with the test
+environment and test scripts defined in a YAML file.
+
+```
+.
+├── .papr.yml
+├── .papr.sh
+└── .papr.inventory
+├── .papr.all-in-one.inventory
+└── .papr-master-ha.inventory
 ```

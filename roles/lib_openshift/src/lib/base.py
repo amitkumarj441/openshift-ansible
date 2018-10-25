@@ -52,7 +52,7 @@ class OpenShiftCLI(object):
 
     # Pylint allows only 5 arguments to be passed.
     # pylint: disable=too-many-arguments
-    def _replace_content(self, resource, rname, content, force=False, sep='.'):
+    def _replace_content(self, resource, rname, content, edits=None, force=False, sep='.'):
         ''' replace the current object with the content '''
         res = self._get(resource, rname)
         if not res['results']:
@@ -61,13 +61,24 @@ class OpenShiftCLI(object):
         fname = Utils.create_tmpfile(rname + '-')
 
         yed = Yedit(fname, res['results'][0], separator=sep)
-        changes = []
-        for key, value in content.items():
-            changes.append(yed.put(key, value))
+        updated = False
 
-        if any([change[0] for change in changes]):
+        if content is not None:
+            changes = []
+            for key, value in content.items():
+                changes.append(yed.put(key, value))
+
+            if any([change[0] for change in changes]):
+                updated = True
+
+        elif edits is not None:
+            results = Yedit.process_edits(edits, yed)
+
+            if results['changed']:
+                updated = True
+
+        if updated:
             yed.write()
-
             atexit.register(Utils.cleanup, [fname])
 
             return self._replace(fname, force)
@@ -129,7 +140,7 @@ class OpenShiftCLI(object):
             cmd.append(template_name)
         if params:
             param_str = ["{}={}".format(key, str(value).replace("'", r'"')) for key, value in params.items()]
-            cmd.append('-v')
+            cmd.append('-p')
             cmd.extend(param_str)
 
         results = self.openshift_cmd(cmd, output=True, input_data=template_data)
@@ -145,12 +156,18 @@ class OpenShiftCLI(object):
 
         return self.openshift_cmd(['create', '-f', fname])
 
-    def _get(self, resource, name=None, selector=None):
+    def _get(self, resource, name=None, selector=None, field_selector=None):
         '''return a resource by name '''
         cmd = ['get', resource]
+
         if selector is not None:
             cmd.append('--selector={}'.format(selector))
-        elif name is not None:
+
+        if field_selector is not None:
+            cmd.append('--field-selector={}'.format(field_selector))
+
+        # Name cannot be used with selector or field_selector.
+        if selector is None and field_selector is None and name is not None:
             cmd.append(name)
 
         cmd.extend(['-o', 'json'])
@@ -273,10 +290,6 @@ class OpenShiftCLI(object):
         elif self.namespace is not None and self.namespace.lower() not in ['none', 'emtpy']:  # E501
             cmds.extend(['-n', self.namespace])
 
-        rval = {}
-        results = ''
-        err = None
-
         if self.verbose:
             print(' '.join(cmds))
 
@@ -286,34 +299,26 @@ class OpenShiftCLI(object):
             returncode, stdout, stderr = 1, '', 'Failed to execute {}: {}'.format(subprocess.list2cmdline(cmds), ex)
 
         rval = {"returncode": returncode,
-                "results": results,
                 "cmd": ' '.join(cmds)}
 
-        if returncode == 0:
-            if output:
-                if output_type == 'json':
-                    try:
-                        rval['results'] = json.loads(stdout)
-                    except ValueError as verr:
-                        if "No JSON object could be decoded" in verr.args:
-                            err = verr.args
-                elif output_type == 'raw':
-                    rval['results'] = stdout
+        if output_type == 'json':
+            rval['results'] = {}
+            if output and stdout:
+                try:
+                    rval['results'] = json.loads(stdout)
+                except ValueError as verr:
+                    if "No JSON object could be decoded" in verr.args:
+                        rval['err'] = verr.args
+        elif output_type == 'raw':
+            rval['results'] = stdout if output else ''
 
-            if self.verbose:
-                print("STDOUT: {0}".format(stdout))
-                print("STDERR: {0}".format(stderr))
+        if self.verbose:
+            print("STDOUT: {0}".format(stdout))
+            print("STDERR: {0}".format(stderr))
 
-            if err:
-                rval.update({"err": err,
-                             "stderr": stderr,
-                             "stdout": stdout,
-                             "cmd": cmds})
-
-        else:
+        if 'err' in rval or returncode != 0:
             rval.update({"stderr": stderr,
-                         "stdout": stdout,
-                         "results": {}})
+                         "stdout": stdout})
 
         return rval
 
@@ -326,7 +331,7 @@ class Utils(object):
         ''' Actually write the file contents to disk. This helps with mocking. '''
 
         with open(filename, 'w') as sfd:
-            sfd.write(contents)
+            sfd.write(str(contents))
 
     @staticmethod
     def create_tmp_file_from_contents(rname, data, ftype='yaml'):
@@ -467,22 +472,22 @@ class Utils(object):
                 version = version.split("-")[0]
 
             if version.startswith('v'):
-                versions_dict[tech + '_numeric'] = version[1:].split('+')[0]
-                # "v3.3.0.33" is what we have, we want "3.3"
-                versions_dict[tech + '_short'] = version[1:4]
+                version = version[1:]  # Remove the 'v' prefix
+                versions_dict[tech + '_numeric'] = version.split('+')[0]
+                # "3.3.0.33" is what we have, we want "3.3"
+                versions_dict[tech + '_short'] = "{}.{}".format(*version.split('.'))
 
         return versions_dict
 
     @staticmethod
     def openshift_installed():
         ''' check if openshift is installed '''
-        import yum
+        import rpm
 
-        yum_base = yum.YumBase()
-        if yum_base.rpmdb.searchNevra(name='atomic-openshift'):
-            return True
+        transaction_set = rpm.TransactionSet()
+        rpmquery = transaction_set.dbMatch("name", "atomic-openshift")
 
-        return False
+        return rpmquery.count() > 0
 
     # Disabling too-many-branches.  This is a yaml dictionary comparison function
     # pylint: disable=too-many-branches,too-many-return-statements,too-many-statements
@@ -610,7 +615,7 @@ class OpenShiftCLIConfig(object):
         for key in sorted(self.config_options.keys()):
             data = self.config_options[key]
             if data['include'] \
-               and (data['value'] or isinstance(data['value'], int)):
+               and (data['value'] is not None or isinstance(data['value'], int)):
                 if key == ascommalist:
                     val = ','.join(['{}={}'.format(kk, vv) for kk, vv in sorted(data['value'].items())])
                 else:

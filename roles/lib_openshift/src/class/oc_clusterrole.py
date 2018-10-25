@@ -56,7 +56,7 @@ class OCClusterRole(OpenShiftCLI):
             self.clusterrole = ClusterRole(content=result['results'][0])
             result['results'] = self.clusterrole.yaml_dict
 
-        elif 'clusterrole "{}" not found'.format(self.name) in result['stderr']:
+        elif '"{}" not found'.format(self.name) in result['stderr']:
             result['returncode'] = 0
             self.clusterrole = None
 
@@ -81,7 +81,7 @@ class OCClusterRole(OpenShiftCLI):
     # pylint: disable=too-many-return-statements,too-many-branches
     @staticmethod
     def run_ansible(params, check_mode):
-        '''run the idempotent ansible code'''
+        '''run the oc_clusterrole module'''
 
         oc_clusterrole = OCClusterRole(params['name'],
                                        params['rules'],

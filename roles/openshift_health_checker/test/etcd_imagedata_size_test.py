@@ -1,7 +1,8 @@
 import pytest
 
 from collections import namedtuple
-from openshift_checks.etcd_imagedata_size import EtcdImageDataSize, OpenShiftCheckException
+from openshift_checks.etcd_imagedata_size import EtcdImageDataSize
+from openshift_checks import OpenShiftCheckException
 from etcdkeysize import check_etcd_key_size
 
 
@@ -51,12 +52,12 @@ def test_cannot_determine_available_mountpath(ansible_mounts, extra_words):
     task_vars = dict(
         ansible_mounts=ansible_mounts,
     )
-    check = EtcdImageDataSize(execute_module=fake_execute_module)
+    check = EtcdImageDataSize(fake_execute_module, task_vars)
 
     with pytest.raises(OpenShiftCheckException) as excinfo:
-        check.run(tmp=None, task_vars=task_vars)
+        check.run()
 
-    for word in 'determine valid etcd mountpath'.split() + extra_words:
+    for word in ['Unable to determine mount point'] + extra_words:
         assert word in str(excinfo.value)
 
 
@@ -111,14 +112,14 @@ def test_cannot_determine_available_mountpath(ansible_mounts, extra_words):
     )
 ])
 def test_check_etcd_key_size_calculates_correct_limit(ansible_mounts, tree, size_limit, should_fail, extra_words):
-    def execute_module(module_name, args, tmp=None, task_vars=None):
+    def execute_module(module_name, module_args, *_):
         if module_name != "etcdkeysize":
             return {
                 "changed": False,
             }
 
         client = fake_etcd_client(tree)
-        s, limit_exceeded = check_etcd_key_size(client, tree["key"], args["size_limit_bytes"])
+        s, limit_exceeded = check_etcd_key_size(client, tree["key"], module_args["size_limit_bytes"])
 
         return {"size_limit_exceeded": limit_exceeded}
 
@@ -126,14 +127,14 @@ def test_check_etcd_key_size_calculates_correct_limit(ansible_mounts, tree, size
         etcd_max_image_data_size_bytes=size_limit,
         ansible_mounts=ansible_mounts,
         openshift=dict(
-            master=dict(etcd_hosts=["localhost"]),
             common=dict(config_base="/var/lib/origin")
-        )
+        ),
+        openshift_master_etcd_hosts=["localhost"]
     )
     if size_limit is None:
         task_vars.pop("etcd_max_image_data_size_bytes")
 
-    check = EtcdImageDataSize(execute_module=execute_module).run(tmp=None, task_vars=task_vars)
+    check = EtcdImageDataSize(execute_module, task_vars).run()
 
     if should_fail:
         assert check["failed"]
@@ -267,14 +268,14 @@ def test_check_etcd_key_size_calculates_correct_limit(ansible_mounts, tree, size
     ),
 ])
 def test_etcd_key_size_check_calculates_correct_size(ansible_mounts, tree, root_path, expected_size, extra_words):
-    def execute_module(module_name, args, tmp=None, task_vars=None):
+    def execute_module(module_name, module_args, *_):
         if module_name != "etcdkeysize":
             return {
                 "changed": False,
             }
 
         client = fake_etcd_client(tree)
-        size, limit_exceeded = check_etcd_key_size(client, root_path, args["size_limit_bytes"])
+        size, limit_exceeded = check_etcd_key_size(client, root_path, module_args["size_limit_bytes"])
 
         assert size == expected_size
         return {
@@ -284,17 +285,17 @@ def test_etcd_key_size_check_calculates_correct_size(ansible_mounts, tree, root_
     task_vars = dict(
         ansible_mounts=ansible_mounts,
         openshift=dict(
-            master=dict(etcd_hosts=["localhost"]),
             common=dict(config_base="/var/lib/origin")
-        )
+        ),
+        openshift_master_etcd_hosts=["localhost"]
     )
 
-    check = EtcdImageDataSize(execute_module=execute_module).run(tmp=None, task_vars=task_vars)
+    check = EtcdImageDataSize(execute_module, task_vars).run()
     assert not check.get("failed", False)
 
 
 def test_etcdkeysize_module_failure():
-    def execute_module(module_name, tmp=None, task_vars=None):
+    def execute_module(module_name, *_):
         if module_name != "etcdkeysize":
             return {
                 "changed": False,
@@ -312,12 +313,12 @@ def test_etcdkeysize_module_failure():
             'size_total': 80 * 10**9,
         }],
         openshift=dict(
-            master=dict(etcd_hosts=["localhost"]),
             common=dict(config_base="/var/lib/origin")
-        )
+        ),
+        openshift_master_etcd_hosts=["localhost"]
     )
 
-    check = EtcdImageDataSize(execute_module=execute_module).run(tmp=None, task_vars=task_vars)
+    check = EtcdImageDataSize(execute_module, task_vars).run()
 
     assert check["failed"]
     for word in "Failed to retrieve stats":

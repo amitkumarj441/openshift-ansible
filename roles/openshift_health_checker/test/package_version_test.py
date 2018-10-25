@@ -3,44 +3,60 @@ import pytest
 from openshift_checks.package_version import PackageVersion
 
 
-def test_package_version():
-    task_vars = dict(
-        openshift=dict(common=dict(service_type='origin')),
-        openshift_release='3.5',
-        openshift_deployment_type='origin',
+def task_vars_for(openshift_release, deployment_type):
+    service_type_dict = {'origin': 'origin',
+                         'openshift-enterprise': 'atomic-openshift'}
+    service_type = service_type_dict[deployment_type]
+    return dict(
+        ansible_pkg_mgr='yum',
+        openshift_service_type=service_type,
+        openshift_release=openshift_release,
+        openshift_image_tag='v' + openshift_release,
+        openshift_deployment_type=deployment_type,
     )
-    return_value = object()
 
-    def execute_module(module_name=None, module_args=None, tmp=None, task_vars=None):
+
+@pytest.mark.parametrize('openshift_release', [
+    "111.7.0",
+    "3.7",
+    "3.6",
+    "3.5.1.2.3",
+    "3.5",
+    "3.4",
+    "3.3",
+    "2.1.0",
+])
+def test_package_version(openshift_release):
+
+    return_value = {"foo": object()}
+
+    def execute_module(module_name=None, module_args=None, tmp=None, task_vars=None, *_):
         assert module_name == 'aos_version'
-        assert 'requested_openshift_release' in module_args
-        assert 'openshift_deployment_type' in module_args
-        assert 'rpm_prefix' in module_args
-        assert module_args['requested_openshift_release'] == task_vars['openshift_release']
-        assert module_args['openshift_deployment_type'] == task_vars['openshift_deployment_type']
-        assert module_args['rpm_prefix'] == task_vars['openshift']['common']['service_type']
+        assert "package_list" in module_args
+
+        for pkg in module_args["package_list"]:
+            if "-master" in pkg["name"] or "-node" in pkg["name"]:
+                assert pkg["version"] == task_vars["openshift_release"]
+
         return return_value
 
-    check = PackageVersion(execute_module=execute_module)
-    result = check.run(tmp=None, task_vars=task_vars)
-    assert result is return_value
+    check = PackageVersion(execute_module, task_vars_for(openshift_release, 'origin'))
+    result = check.run()
+    assert result == return_value
 
 
-@pytest.mark.parametrize('group_names,is_containerized,is_active', [
-    (['masters'], False, True),
-    # ensure check is skipped on containerized installs
-    (['masters'], True, False),
-    (['nodes'], False, True),
-    (['masters', 'nodes'], False, True),
-    (['masters', 'etcd'], False, True),
-    ([], False, False),
-    (['etcd'], False, False),
-    (['lb'], False, False),
-    (['nfs'], False, False),
+@pytest.mark.parametrize('group_names,is_active', [
+    (['oo_masters_to_config'], True),
+    (['oo_nodes_to_config'], True),
+    (['oo_masters_to_config', 'oo_nodes_to_config'], True),
+    (['oo_masters_to_config', 'oo_etcd_to_config'], True),
+    ([], False),
+    (['oo_etcd_to_config'], False),
+    (['lb'], False),
+    (['nfs'], False),
 ])
-def test_package_version_skip_when_not_master_nor_node(group_names, is_containerized, is_active):
+def test_package_version_skip_when_not_master_nor_node(group_names, is_active):
     task_vars = dict(
         group_names=group_names,
-        openshift=dict(common=dict(is_containerized=is_containerized)),
     )
-    assert PackageVersion.is_active(task_vars=task_vars) == is_active
+    assert PackageVersion(None, task_vars).is_active() == is_active

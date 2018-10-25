@@ -1,71 +1,15 @@
 ---
-- set_fact:
-    glusterfs_timeout: "{{ openshift_storage_glusterfs_registry_timeout }}"
-    glusterfs_namespace: "{{ openshift_storage_glusterfs_registry_namespace }}"
-    glusterfs_is_native: "{{ openshift_storage_glusterfs_registry_is_native }}"
-    glusterfs_nodeselector: "{{ openshift_storage_glusterfs_registry_nodeselector | map_from_pairs }}"
-    glusterfs_image: "{{ openshift_storage_glusterfs_registry_image }}"
-    glusterfs_version: "{{ openshift_storage_glusterfs_registry_version }}"
-    glusterfs_wipe: "{{ openshift_storage_glusterfs_registry_wipe }}"
-    glusterfs_heketi_is_native: "{{ openshift_storage_glusterfs_registry_heketi_is_native }}"
-    glusterfs_heketi_is_missing: "{{ openshift_storage_glusterfs_registry_heketi_is_missing }}"
-    glusterfs_heketi_deploy_is_missing: "{{ openshift_storage_glusterfs_registry_heketi_deploy_is_missing }}"
-    glusterfs_heketi_image: "{{ openshift_storage_glusterfs_registry_heketi_image }}"
-    glusterfs_heketi_version: "{{ openshift_storage_glusterfs_registry_heketi_version }}"
-    glusterfs_heketi_admin_key: "{{ openshift_storage_glusterfs_registry_heketi_admin_key }}"
-    glusterfs_heketi_user_key: "{{ openshift_storage_glusterfs_registry_heketi_user_key }}"
-    glusterfs_heketi_topology_load: "{{ openshift_storage_glusterfs_registry_heketi_topology_load }}"
-    glusterfs_heketi_wipe: "{{ openshift_storage_glusterfs_registry_heketi_wipe }}"
-    glusterfs_heketi_url: "{{ openshift_storage_glusterfs_registry_heketi_url }}"
-    glusterfs_nodes: "{{ g_glusterfs_registry_hosts }}"
+- import_tasks: glusterfs_registry_facts.yml
 
-- include: glusterfs_common.yml
-  when: g_glusterfs_registry_hosts != g_glusterfs_hosts
-
-- name: Delete pre-existing GlusterFS registry resources
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    kind: "{{ item.kind }}"
-    name: "{{ item.name | default(omit) }}"
-    selector: "{{ item.selector | default(omit) }}"
-    state: absent
-  with_items:
-  - kind: "svc,ep"
-    name: "glusterfs-registry-endpoints"
-  failed_when: False
-
-- name: Generate GlusterFS registry endpoints
-  template:
-    src: "{{ openshift.common.examples_content_version }}/glusterfs-registry-endpoints.yml.j2"
-    dest: "{{ mktemp.stdout }}/glusterfs-registry-endpoints.yml"
-
-- name: Copy GlusterFS registry service
-  copy:
-    src: "{{ openshift.common.examples_content_version }}/glusterfs-registry-service.yml"
-    dest: "{{ mktemp.stdout }}/glusterfs-registry-service.yml"
-
-- name: Create GlusterFS registry endpoints
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    state: present
-    kind: endpoints
-    name: glusterfs-registry-endpoints
-    files:
-    - "{{ mktemp.stdout }}/glusterfs-registry-endpoints.yml"
-
-- name: Create GlusterFS registry service
-  oc_obj:
-    namespace: "{{ glusterfs_namespace }}"
-    state: present
-    kind: service
-    name: glusterfs-registry-endpoints
-    files:
-    - "{{ mktemp.stdout }}/glusterfs-registry-service.yml"
+- import_tasks: glusterfs_common.yml
+  when:
+  - glusterfs_nodes | default([]) | count > 0
+  - "'glusterfs' not in groups or glusterfs_nodes != groups.glusterfs"
 
 - name: Check if GlusterFS registry volume exists
-  command: "heketi-cli -s http://{{ glusterfs_heketi_url }} --user admin --secret '{{ glusterfs_heketi_admin_key }}' volume list"
+  command: "{{ glusterfs_heketi_client }} volume list"
   register: registry_volume
 
 - name: Create GlusterFS registry volume
-  command: "heketi-cli -s http://{{ glusterfs_heketi_url }} --user admin --secret '{{ glusterfs_heketi_admin_key }}' volume create --size={{ openshift.hosted.registry.storage.volume.size | replace('Gi','') }} --name={{ openshift.hosted.registry.storage.glusterfs.path }}"
-  when: "openshift.hosted.registry.storage.glusterfs.path not in registry_volume.stdout"
+  command: "{{ glusterfs_heketi_client }} volume create --size={{ openshift_hosted_registry_storage_volume_size | replace('Gi','') }} --name={{ openshift_hosted_registry_storage_glusterfs_path }}"
+  when: "openshift_hosted_registry_storage_glusterfs_path not in registry_volume.stdout"
